@@ -34,27 +34,36 @@ writeFileSync(cfgFile, JSON.stringify(cfg, null, 2) + '\n');
 const app = read('app.js')
   .replace('/*DATA*/null', () => read('pagedata.json'))
   .replace('/*SEED*/null', () => read('seed.json'));
-const html = '<!doctype html>\n<html lang="en">\n' + read('head.html')
+const round1 = '<!doctype html>\n<html lang="en">\n' + read('head.html')
   + `<script>\nwindow.LSW = { api: ${JSON.stringify(cfg.api || '')}, token: /*TOKEN*/null };\n${app}\n</script>\n</html>\n`;
+
+// Round 2 reuses round 1's design tokens and base styles, so the two pages read as one site.
+const baseStyle = read('head.html').match(/<style>([\s\S]*?)<\/style>/)[1];
+const round2 = read('round2.html')
+  .replace('/*BASESTYLE*/', () => baseStyle)
+  .replace('/*API*/null', () => JSON.stringify(cfg.api || ''))
+  .replace('/*COUNTS*/null', () => read('round2-counts.json'));
 
 const te = new TextEncoder();
 const base = await crypto.subtle.importKey('raw', te.encode(cfg.password), 'PBKDF2', false, ['deriveKey']);
 const key = await crypto.subtle.deriveKey(
   { name: 'PBKDF2', salt: Buffer.from(cfg.salt, 'base64'), iterations: ITER, hash: 'SHA-256' },
   base, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
-const iv = randomBytes(12);
-const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, te.encode(html));
+const gateTemplate = readFileSync(new URL('./gate.html', import.meta.url), 'utf8');
+const v = createHash('sha256').update(cfg.salt + cfg.password).digest('hex').slice(0, 8);
 
-const payload = {
-  v: createHash('sha256').update(cfg.salt + cfg.password).digest('hex').slice(0, 8),
-  salt: cfg.salt, iter: ITER, iv: iv.toString('base64'), ct: Buffer.from(ct).toString('base64'),
-};
-const gate = readFileSync(new URL('./gate.html', import.meta.url), 'utf8')
-  .replace('/*PAYLOAD*/null', () => JSON.stringify(payload));
-writeFileSync(new URL('./index.html', import.meta.url), gate);
+async function seal(html, out) {
+  const iv = randomBytes(12);
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, te.encode(html));
+  const payload = { v, salt: cfg.salt, iter: ITER, iv: iv.toString('base64'), ct: Buffer.from(ct).toString('base64') };
+  const page = gateTemplate.replace('/*PAYLOAD*/null', () => JSON.stringify(payload));
+  writeFileSync(new URL('./' + out, import.meta.url), page);
+  console.log(`${out} written (${(page.length / 1024).toFixed(0)} KB)`);
+}
+await seal(round1, 'index.html');
+await seal(round2, 'round2.html');
 
 const token = createHash('sha256').update('lsw-api:' + cfg.password).digest('hex');
-console.log(`index.html written (${(gate.length / 1024).toFixed(0)} KB)`);
 console.log(`password:      ${cfg.password}`);
 console.log(`sheet TOKEN:   ${token}`);
 console.log(`sheet URL:     ${cfg.api || '(not set — run with --api <url> once the Apps Script is deployed)'}`);
